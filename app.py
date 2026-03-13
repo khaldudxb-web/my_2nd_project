@@ -2,9 +2,13 @@ from flask import Flask, render_template, redirect, url_for, request, session, f
 from flask_mail import Mail, Message
 from pymongo import MongoClient
 from werkzeug.security import generate_password_hash, check_password_hash
-from datetime import datetime
+from datetime import datetime, timedelta
 import os
+import random
 from dotenv import load_dotenv
+from dateutil.relativedelta import relativedelta
+from bson import ObjectId
+import json
 
 # Load environment variables from .env file
 load_dotenv()
@@ -38,7 +42,66 @@ client = MongoClient("mongodb+srv://khaldudxb_db_user:5zWzdlnZYrOJnXLe@mongodbcl
 db = client["Aviation"]
 aviation_data = db["Aviation_Data"]
 contact_messages = db["Contact_Messages"]
+employees = db["Employees"]
 
+# Seed sample employee data if not present
+def seed_employees(count=100):
+    existing = employees.count_documents({})
+    if existing == count:
+        return
+    if existing > 0:
+        employees.delete_many({})
+
+    first_names = [
+        "Alex", "Jordan", "Taylor", "Morgan", "Riley", "Casey", "Jamie", "Cameron", "Drew", "Reese",
+        "Avery", "Quinn", "Hayden", "Rowan", "Parker", "Sydney", "Payton", "Blake", "Kendall", "Harper"
+    ]
+    last_names = [
+        "Smith", "Johnson", "Williams", "Brown", "Jones", "Garcia", "Miller", "Davis", "Rodriguez", "Martinez",
+        "Hernandez", "Lopez", "Gonzalez", "Wilson", "Anderson", "Thomas", "Taylor", "Moore", "Jackson", "Martin"
+    ]
+    designations = [
+        "Pilot", "Co-Pilot", "Flight Attendant", "Maintenance Engineer", "Operations Manager", "Ground Support",
+        "Air Traffic Controller", "Avionics Technician", "Safety Officer", "Flight Dispatcher"
+    ]
+    genders = ["Male", "Female"]
+
+    used_names = set()
+    base_date = datetime.utcnow() - timedelta(days=365 * 5)
+
+    new_employees = []
+    while len(new_employees) < count:
+        first = random.choice(first_names)
+        last = random.choice(last_names)
+        full = f"{first} {last}"
+        if full in used_names:
+            continue
+        used_names.add(full)
+
+        age = random.randint(23, 60)
+        doj = base_date + timedelta(days=random.randint(30, 365 * 5))
+        gender = random.choice(genders)
+        designation = random.choice(designations)
+
+        new_employees.append({
+            "name": full,
+            "designation": designation,
+            "gender": gender,
+            "age": age,
+            "date_of_joining": doj,
+        })
+
+    employees.insert_many(new_employees)
+
+# Create a default admin user if missing
+if not aviation_data.find_one({"username": "admin"}):
+    aviation_data.insert_one({
+        "username": "admin",
+        "email": "admin@aviationcorp.com",
+        "password": generate_password_hash("admin123")
+    })
+
+seed_employees()
 @app.route('/')
 def index():
     return redirect(url_for('home'))
@@ -107,6 +170,17 @@ def login():
 
     return render_template('login.html')
 
+@app.route('/login-as-admin')
+def login_as_admin():
+    admin_user = aviation_data.find_one({"username": "admin"})
+    if not admin_user:
+        flash('Admin account not found.', 'error')
+        return redirect(url_for('login'))
+
+    session['username'] = 'admin'
+    flash('Logged in as admin.', 'success')
+    return redirect(url_for('dashboard'))
+
 @app.route('/register', methods=['GET', 'POST'])
 def register():
     if request.method == 'POST':
@@ -156,7 +230,24 @@ def dashboard():
     if 'username' not in session:
         flash('Please login to access the dashboard.', 'error')
         return redirect(url_for('login'))
-    return render_template('dashboard.html', username=session['username'], is_dashboard=True)
+
+    # Load employees for the dashboard table
+    employee_list = list(employees.find({}, {"_id": 0}).sort('name', 1))
+    
+    # Calculate tenure for each employee
+    current_date = datetime.now()
+    for emp in employee_list:
+        tenure = relativedelta(current_date, emp['date_of_joining'])
+        emp['tenure'] = f"{tenure.years} years, {tenure.months} months"
+        emp['tenure_months'] = (tenure.years * 12) + tenure.months
+        emp['year_joined'] = emp['date_of_joining'].year
+
+    return render_template(
+        'dashboard.html',
+        username=session['username'],
+        is_dashboard=True,
+        employees=employee_list
+    )
 
 @app.route('/admin/contact-messages')
 def admin_contact_messages():
@@ -165,7 +256,7 @@ def admin_contact_messages():
         return redirect(url_for('login'))
     
     # Get all contact messages, sorted by newest first
-    messages = list(contact_messages.find().sort('submitted_at', -1))
+    messages = list(contact_messages.find({}, {"_id": 0}).sort('submitted_at', -1))
     return render_template('admin_contact.html', messages=messages)
 
 @app.route('/logout')
